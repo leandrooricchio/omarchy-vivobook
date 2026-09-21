@@ -314,13 +314,7 @@ def thermals():
         for tz in glob.glob("/sys/class/thermal/thermal_zone*"):
             if read_file(os.path.join(tz, "type")) in ("TCPU", "x86_pkg_temp"):
                 cpu = read_int(os.path.join(tz, "temp"))
-    fans = []
-    for hw in glob.glob("/sys/class/hwmon/hwmon*"):
-        if read_file(os.path.join(hw, "name")) == "asus":
-            for fan in sorted(glob.glob(os.path.join(hw, "fan*_input"))):
-                label = read_file(fan.replace("_input", "_label")) or os.path.basename(fan)
-                fans.append({"label": label, "rpm": read_int(fan, 0)})
-    return {"cpuC": (cpu / 1000.0) if cpu is not None else None, "fans": fans}
+    return {"cpuC": (cpu / 1000.0) if cpu is not None else None}
 
 
 def profile_set(profile):

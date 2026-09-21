@@ -8,7 +8,7 @@ control is also reachable from keybindings, the Omarchy menu and the command lin
 |---|---|
 | Keyboard light (0–3) | `asus::kbd_backlight` LED via `brightnessctl` |
 | Keyboard RGB color and effects | HID LampArray reports to the ITE5570 controller (`/dev/hidraw*`), driven by a small user daemon (`vivobook-rgbd`) for breathing/rainbow |
-| Performance profile | `power-profiles-daemon` through `omarchy-powerprofiles-set` (quiet / balanced / performance) — CPU temperature and fan RPM shown read-only |
+| Performance profile | `power-profiles-daemon` through `omarchy-powerprofiles-set` (quiet / balanced / performance) — CPU temperature shown alongside |
 | Battery charge limit (60 / 80 / 100 %) | `charge_control_end_threshold` via a tiny root helper, restored at boot and after resume |
 | Copilot key | The key emits `Meta+Shift+F23` (keycode 201). Omarchy binds it to its menu by default; the generated Hyprland file takes the key over and runs the action you pick (default: launch your default Omarchy agent) |
 | Touchpad gestures | Generated `hl.gesture(...)` rules: 3-finger swipe ↔ workspaces, 3-finger ↑/↓ actions, 4-finger ↔ move window, pinch to float |
@@ -92,7 +92,7 @@ logged-in seat user via udev `uaccess` ACLs.
 - The RGB controller is `0B05:19B6` (ITE5570) on I2C-HID, exposed as a HID LampArray
   (usage page 0x59). `asusctl` does not support Vivobooks, and the WMI LED only carries the
   0–3 brightness. `vivobook-ctl rgb info` prints the lamp count and report ids it detected.
-- The fan on this model reports RPM but exposes no curve or PWM control.
+- The fan on this model exposes no curve or PWM control, so the plugin does not show or touch it.
 - The Copilot key needs kernel ≥ 6.14 to be reported as `F23`.
 
 ## License

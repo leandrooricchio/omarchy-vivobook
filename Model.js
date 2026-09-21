@@ -49,15 +49,6 @@ function tempText(c) {
   return (c === null || c === undefined) ? "—" : Math.round(c) + "°C"
 }
 
-// Fan is a sensor only on this model (no curve / PWM exposed); mention it
-// only while it is actually spinning so it does not read like a control.
-function fanText(fans) {
-  if (!fans || !fans.length) return ""
-  var rpm = 0
-  for (var i = 0; i < fans.length; i++) rpm = Math.max(rpm, fans[i].rpm || 0)
-  return rpm > 0 ? " · FAN " + rpm + " rpm" : ""
-}
-
 function batteryText(charge) {
   if (!charge || charge.percent === null || charge.percent === undefined) return "—"
   var status = String(charge.status || "")

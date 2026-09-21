@@ -484,7 +484,7 @@ Panel {
               PanelSectionHeader { id: perfHeader; text: "PERFORMANCE"; foreground: root.fg; fontFamily: root.ff; anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter }
               Text {
                 id: perfValue
-                text: "CPU " + Model.tempText(root.profile.cpuC) + Model.fanText(root.profile.fans)
+                text: "CPU " + Model.tempText(root.profile.cpuC)
                 color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption; font.bold: true
                 anchors.right: parent.right; anchors.rightMargin: Style.space(6); anchors.verticalCenter: parent.verticalCenter
               }
