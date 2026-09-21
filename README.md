@@ -4,6 +4,8 @@ An [Omarchy](https://omarchy.org) shell plugin for the ASUS Vivobook S 14 (S5406
 siblings). One bar icon opens a dashboard with the laptop's ASUS-specific controls, and every
 control is also reachable from keybindings, the Omarchy menu and the command line.
 
+<p align="center"><img src="preview.png" width="420" alt="Vivobook Control panel"></p>
+
 | Control | How it works on Linux |
 |---|---|
 | Keyboard light (0–3) | `asus::kbd_backlight` LED via `brightnessctl` |
