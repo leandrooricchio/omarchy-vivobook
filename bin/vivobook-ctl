@@ -42,8 +42,8 @@ RGB_MODES = ["static", "breathing", "rainbow", "auto", "off"]
 COLOR_PRESETS = ["7AA2F7", "BB9AF7", "F7768E", "FF9E64", "E0AF68", "9ECE6A", "7DCFFF", "FFFFFF"]
 
 COPILOT_PRESETS = {
-    "agent-pick": ("Default agent", "omarchy-agent --pick"),
-    "agent": ("Default agent (no picker)", "omarchy-agent"),
+    "agent-pick": ("Default agent (picker if none set)", "omarchy-agent --pick"),
+    "agent": ("Default agent (never show picker)", "omarchy-agent"),
     "dashboard": ("Vivobook dashboard", f"omarchy-shell shell toggle {PLUGIN_ID}"),
     "menu": ("Omarchy menu", "omarchy-menu toggle root"),
     "custom": ("Custom command", ""),
