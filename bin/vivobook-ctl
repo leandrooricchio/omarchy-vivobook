@@ -56,7 +56,7 @@ GESTURE_TOGGLES = {
 }
 GESTURE_ACTIONS = {
     "fullscreen": 'hl.dsp.window.fullscreen({ mode = "fullscreen" })',
-    "maximized": 'hl.dsp.window.fullscreen({ mode = "maximize" })',
+    "maximized": 'hl.dsp.window.fullscreen({ mode = "maximized" })',
     "close": "hl.dsp.window.close()",
     "none": None,
 }
