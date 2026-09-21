@@ -582,7 +582,7 @@ def python_has(module):
 def touchpad_event():
     for dev in glob.glob("/sys/class/input/event*"):
         if read_file(os.path.join(dev, "device", "name")) == TOUCHPAD_NAME:
-            return "/dev/" + os.path.basename(dev)
+            return "/dev/input/" + os.path.basename(dev)
     return None
 
 

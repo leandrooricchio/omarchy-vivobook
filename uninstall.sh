@@ -25,7 +25,7 @@ as_user systemctl --user daemon-reload || true
 systemctl disable --now vivobook-charge.service 2>/dev/null || true
 rm -f /etc/systemd/system/vivobook-charge.service /etc/sudoers.d/vivobook /usr/local/libexec/vivobook-charge
 rm -rf /etc/vivobook
-rm -f /usr/lib/systemd/system-sleep/vivobook /etc/udev/rules.d/70-vivobook.rules
+rm -f /usr/lib/systemd/system-sleep/vivobook /etc/udev/rules.d/70-vivobook.rules /etc/modules-load.d/vivobook.conf
 systemctl daemon-reload
 udevadm control --reload
 

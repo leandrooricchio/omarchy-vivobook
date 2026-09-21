@@ -22,7 +22,7 @@ import lamparray  # noqa: E402
 CONFIG_PATH = os.path.expanduser("~/.config/omarchy/vivobook/config.json")
 DEFAULT_RGB = {"mode": "static", "color": "7AA2F7", "intensity": 255, "speed": 1.0}
 RETRY_SECONDS = 10
-FRAME_SECONDS = 1 / 20
+FRAME_SECONDS = 0.06  # controller reports a 50 ms minimum update interval
 
 
 def log(msg):

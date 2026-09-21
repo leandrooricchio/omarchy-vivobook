@@ -51,6 +51,10 @@ pacman -S --needed --noconfirm python-evdev brightnessctl wtype
 
 step "Installing udev rules"
 install -Dm644 "$SRC/system/70-vivobook.rules" /etc/udev/rules.d/70-vivobook.rules
+# /dev/uinput is a static node until the module loads; load it now and at boot
+# so udev actually processes the device and applies the uaccess rule.
+printf 'uinput\n' >/etc/modules-load.d/vivobook.conf
+modprobe uinput || true
 udevadm control --reload
 udevadm trigger --subsystem-match=hidraw --subsystem-match=misc --subsystem-match=input --action=change
 
