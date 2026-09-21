@@ -1,0 +1,11 @@
+[Unit]
+Description=Restore the Vivobook battery charge limit
+After=multi-user.target
+ConditionPathExists=/etc/vivobook/charge-limit
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/vivobook-charge restore
+
+[Install]
+WantedBy=multi-user.target

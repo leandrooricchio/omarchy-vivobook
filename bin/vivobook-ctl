@@ -1,0 +1,743 @@
+#!/usr/bin/env python3
+"""vivobook-ctl - hardware controls for the ASUS Vivobook S 14 on Omarchy.
+
+Every hardware operation the Vivobook Control panel offers lives here so the
+same code path serves the panel, keybindings, the Omarchy menu and the shell.
+Stdlib only. State lives in ~/.config/omarchy/vivobook/config.json.
+"""
+
+import argparse
+import glob
+import json
+import os
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import lamparray  # noqa: E402
+
+PLUGIN_ID = "io.github.leandrooricchio.vivobook"
+HOME = os.path.expanduser("~")
+CONFIG_DIR = os.path.join(HOME, ".config/omarchy/vivobook")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+HYPR_OUT = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local/state")),
+                        "omarchy/toggles/hypr/vivobook.lua")
+BAT_DIR = "/sys/class/power_supply/BAT0"
+CHARGE_ATTR = os.path.join(BAT_DIR, "charge_control_end_threshold")
+CHARGE_HELPER = "/usr/local/libexec/vivobook-charge"
+PLATFORM_PROFILE = "/sys/firmware/acpi/platform_profile"
+UDEV_RULES = "/etc/udev/rules.d/70-vivobook.rules"
+TOUCHPAD_NAME = "ASCE1200:00 04F3:32E2 Touchpad"
+
+PROFILES = ["quiet", "balanced", "performance"]
+PLATFORM_TO_PPD = {"quiet": "power-saver", "low-power": "power-saver",
+                   "balanced": "balanced", "performance": "performance"}
+PPD_TO_PLATFORM = {"power-saver": "quiet", "balanced": "balanced", "performance": "performance"}
+CHARGE_LIMITS = [60, 80, 100]
+RGB_MODES = ["static", "breathing", "rainbow", "auto", "off"]
+COLOR_PRESETS = ["7AA2F7", "BB9AF7", "F7768E", "FF9E64", "E0AF68", "9ECE6A", "7DCFFF", "FFFFFF"]
+
+COPILOT_PRESETS = {
+    "agent-pick": ("Default agent", "omarchy-agent --pick"),
+    "agent": ("Default agent (no picker)", "omarchy-agent"),
+    "dashboard": ("Vivobook dashboard", f"omarchy-shell shell toggle {PLUGIN_ID}"),
+    "menu": ("Omarchy menu", "omarchy-menu toggle root"),
+    "custom": ("Custom command", ""),
+}
+
+GESTURE_TOGGLES = {
+    "workspace3": "3-finger swipe left/right: switch workspace",
+    "move4": "4-finger swipe left/right: move window to next workspace",
+    "pinchFloat": "Pinch: toggle floating window",
+}
+GESTURE_ACTIONS = {
+    "fullscreen": 'hl.dsp.window.fullscreen({ mode = "fullscreen" })',
+    "maximized": 'hl.dsp.window.fullscreen({ mode = "maximize" })',
+    "close": "hl.dsp.window.close()",
+    "none": None,
+}
+
+DEFAULT_CONFIG = {
+    "version": 1,
+    "kbd": {"level": 2},
+    "rgb": {"mode": "static", "color": "7AA2F7", "intensity": 255, "speed": 1.0},
+    "charge": {"limit": 100},
+    "copilot": {"action": "agent-pick", "command": COPILOT_PRESETS["agent-pick"][1]},
+    "gestures": {"workspace3": True, "up3": "fullscreen", "down3": "none",
+                 "move4": True, "pinchFloat": True},
+    "bindings": {"dashboard": True, "dashboardKey": "SUPER + SHIFT + V"},
+    "edge": {"enabled": False, "zonePct": 4, "stepPx": 40, "deadzoneBottomPct": 15,
+             "right": "brightness", "left": "volume", "top": "history"},
+}
+
+
+# --------------------------------------------------------------------------- utils
+
+def read_file(path, default=None):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def read_int(path, default=None):
+    value = read_file(path)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def merge(base, override):
+    out = dict(base)
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    return merge(DEFAULT_CONFIG, data)
+
+
+def save_config(cfg):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=CONFIG_DIR, prefix=".config.", suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, CONFIG_PATH)
+
+
+def run(cmd, check=False, capture=True):
+    return subprocess.run(cmd, check=check, text=True,
+                          stdout=subprocess.PIPE if capture else None,
+                          stderr=subprocess.PIPE if capture else None)
+
+
+def spawn(cmd):
+    """Fire and forget: keybinding/menu launches must not block on the child."""
+    if isinstance(cmd, str):
+        cmd = shlex.split(cmd)
+    subprocess.Popen(cmd, start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def osd(icon, progress=None, message=None):
+    if not shutil.which("omarchy-osd"):
+        return
+    cmd = ["omarchy-osd", "-i", icon]
+    if progress is not None:
+        cmd += ["-p", str(int(progress))]
+    if message:
+        cmd += ["-m", message]
+    spawn(cmd)
+
+
+def emit(args, data, text=None):
+    if getattr(args, "json", False):
+        print(json.dumps(data))
+    elif text is not None:
+        print(text)
+
+
+def fail(msg, code=1):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def user_unit_state(*units):
+    if not shutil.which("systemctl"):
+        return {u: "unknown" for u in units}
+    res = run(["systemctl", "--user", "show", "-p", "ActiveState", "--value", *units])
+    states = [s for s in res.stdout.split("\n") if s]
+    return {u: (states[i] if i < len(states) else "unknown") for i, u in enumerate(units)}
+
+
+# --------------------------------------------------------------------------- keyboard backlight
+
+def kbd_led():
+    for path in sorted(glob.glob("/sys/class/leds/*kbd_backlight*")):
+        return path
+    return None
+
+
+def kbd_state():
+    led = kbd_led()
+    if not led:
+        return {"available": False, "level": 0, "max": 0}
+    return {"available": True, "level": read_int(os.path.join(led, "brightness"), 0),
+            "max": read_int(os.path.join(led, "max_brightness"), 3), "device": os.path.basename(led)}
+
+
+def kbd_set(level, show_osd=True):
+    st = kbd_state()
+    if not st["available"]:
+        fail("no keyboard backlight LED found")
+    level = max(0, min(st["max"], int(level)))
+    res = run(["brightnessctl", "-q", "-d", st["device"], "set", str(level)])
+    if res.returncode != 0:
+        fail(res.stderr.strip() or "brightnessctl failed")
+    cfg = load_config()
+    cfg["kbd"]["level"] = level
+    save_config(cfg)
+    if show_osd:
+        osd("keyboard", level * 100 // max(1, st["max"]))
+    return {**st, "level": level}
+
+
+def cmd_kbd(args):
+    st = kbd_state()
+    if args.action == "get":
+        emit(args, st, str(st["level"]))
+        return
+    if args.action == "set":
+        new = kbd_set(args.value, not args.no_osd)
+    elif args.action == "up":
+        new = kbd_set(st["level"] + 1, not args.no_osd)
+    elif args.action == "down":
+        new = kbd_set(st["level"] - 1, not args.no_osd)
+    else:  # cycle
+        new = kbd_set((st["level"] + 1) % (st["max"] + 1), not args.no_osd)
+    emit(args, new, str(new["level"]))
+
+
+# --------------------------------------------------------------------------- rgb
+
+def rgb_daemon_notify():
+    """Ask vivobook-rgbd to re-read the config; apply directly when it is not running."""
+    state = user_unit_state("vivobook-rgbd.service")["vivobook-rgbd.service"]
+    if state == "active":
+        run(["systemctl", "--user", "kill", "-s", "HUP", "vivobook-rgbd.service"])
+        return "daemon"
+    rgb_apply_once(load_config()["rgb"])
+    return "direct"
+
+
+def rgb_apply_once(rgb):
+    mode = rgb.get("mode", "static")
+    try:
+        with lamparray.LampArray() as la:
+            if mode == "auto":
+                la.autonomous()
+            elif mode == "off":
+                la.set_all(0, 0, 0, 0)
+            else:  # static; animated modes need the daemon, show the base color meanwhile
+                r, g, b = lamparray.hex_to_rgb(rgb.get("color", "FFFFFF"))
+                la.set_all(r, g, b, int(rgb.get("intensity", 255)))
+    except lamparray.LampArrayError as e:
+        fail(str(e), 2)
+
+
+def cmd_rgb(args):
+    cfg = load_config()
+    rgb = cfg["rgb"]
+    if args.action == "info":
+        try:
+            with lamparray.LampArray() as la:
+                attrs = la.attributes()
+        except lamparray.LampArrayError as e:
+            fail(str(e), 2)
+        emit(args, attrs, json.dumps(attrs, indent=2))
+        return
+    if args.action == "get":
+        emit(args, rgb, f'{rgb["mode"]} {rgb["color"]}')
+        return
+    if args.action == "set":
+        try:
+            r, g, b = lamparray.hex_to_rgb(args.color)
+        except ValueError as e:
+            fail(str(e))
+        rgb["color"] = f"{r:02X}{g:02X}{b:02X}"
+        if args.intensity is not None:
+            rgb["intensity"] = max(0, min(255, args.intensity))
+        if rgb["mode"] in ("off", "auto"):
+            rgb["mode"] = "static"
+    elif args.action == "effect":
+        rgb["mode"] = args.mode
+        if args.speed is not None:
+            rgb["speed"] = max(0.1, min(5.0, args.speed))
+    elif args.action == "next":
+        presets = COLOR_PRESETS
+        try:
+            idx = (presets.index(rgb["color"].upper()) + 1) % len(presets)
+        except ValueError:
+            idx = 0
+        rgb["color"] = presets[idx]
+        if rgb["mode"] in ("off", "auto"):
+            rgb["mode"] = "static"
+    elif args.action == "off":
+        rgb["mode"] = "off"
+    elif args.action == "auto":
+        rgb["mode"] = "auto"
+    save_config(cfg)
+    via = rgb_daemon_notify()
+    if not args.no_osd:
+        osd("keyboard", message=f'RGB {rgb["mode"]}' + (f' #{rgb["color"]}' if rgb["mode"] in ("static", "breathing") else ""))
+    emit(args, {**rgb, "via": via}, f'{rgb["mode"]} {rgb["color"]}')
+
+
+# --------------------------------------------------------------------------- performance profile
+
+def profile_state():
+    platform = read_file(PLATFORM_PROFILE)
+    choices = (read_file(PLATFORM_PROFILE + "_choices") or "").split()
+    ppd = PLATFORM_TO_PPD.get(platform)
+    temps = thermals()
+    return {"available": platform is not None, "platform": platform, "ppd": ppd,
+            "choices": [c for c in PROFILES if c in choices] or choices, **temps}
+
+
+def thermals():
+    cpu = None
+    for hw in glob.glob("/sys/class/hwmon/hwmon*"):
+        name = read_file(os.path.join(hw, "name"))
+        if name == "coretemp":
+            for label in glob.glob(os.path.join(hw, "temp*_label")):
+                if read_file(label) == "Package id 0":
+                    cpu = read_int(label.replace("_label", "_input"))
+            if cpu is None:
+                cpu = read_int(os.path.join(hw, "temp1_input"))
+    if cpu is None:
+        for tz in glob.glob("/sys/class/thermal/thermal_zone*"):
+            if read_file(os.path.join(tz, "type")) in ("TCPU", "x86_pkg_temp"):
+                cpu = read_int(os.path.join(tz, "temp"))
+    fans = []
+    for hw in glob.glob("/sys/class/hwmon/hwmon*"):
+        if read_file(os.path.join(hw, "name")) == "asus":
+            for fan in sorted(glob.glob(os.path.join(hw, "fan*_input"))):
+                label = read_file(fan.replace("_input", "_label")) or os.path.basename(fan)
+                fans.append({"label": label, "rpm": read_int(fan, 0)})
+    return {"cpuC": (cpu / 1000.0) if cpu is not None else None, "fans": fans}
+
+
+def profile_set(profile):
+    if profile not in PLATFORM_TO_PPD:
+        fail(f"unknown profile {profile}; choose from {', '.join(PROFILES)}")
+    ppd = PLATFORM_TO_PPD[profile]
+    if shutil.which("omarchy-powerprofiles-set"):
+        res = run(["omarchy-powerprofiles-set", "autodetect", ppd])
+    else:
+        res = run(["powerprofilesctl", "set", ppd])
+    if res.returncode != 0:
+        fail(res.stderr.strip() or "could not set power profile")
+    return profile_state()
+
+
+def cmd_profile(args):
+    if args.action == "get":
+        st = profile_state()
+        emit(args, st, st["platform"] or "unavailable")
+        return
+    if args.action == "cycle":
+        st = profile_state()
+        choices = st["choices"] or PROFILES
+        try:
+            nxt = choices[(choices.index(st["platform"]) + 1) % len(choices)]
+        except ValueError:
+            nxt = choices[0]
+        st = profile_set(nxt)
+    else:
+        st = profile_set(args.value)
+    if not args.no_osd:
+        icons = {"quiet": "󰾆", "balanced": "󰾅", "performance": "󰓅"}
+        osd(icons.get(st["platform"], "󰾅"), message=(st["platform"] or "").capitalize())
+    emit(args, st, st["platform"])
+
+
+# --------------------------------------------------------------------------- charge limit
+
+def charge_state():
+    present = os.path.isdir(BAT_DIR)
+    limit = read_int(CHARGE_ATTR)
+    helper_ok = os.path.exists(CHARGE_HELPER) and run(["sudo", "-n", "-l", CHARGE_HELPER]).returncode == 0
+    return {"available": present and limit is not None, "limit": limit,
+            "writable": os.access(CHARGE_ATTR, os.W_OK) or helper_ok,
+            "percent": read_int(os.path.join(BAT_DIR, "capacity")),
+            "status": read_file(os.path.join(BAT_DIR, "status")),
+            "cycles": read_int(os.path.join(BAT_DIR, "cycle_count"))}
+
+
+def charge_set(limit):
+    limit = int(limit)
+    if limit not in CHARGE_LIMITS:
+        fail(f"limit must be one of {CHARGE_LIMITS}")
+    if os.access(CHARGE_ATTR, os.W_OK):
+        with open(CHARGE_ATTR, "w") as f:
+            f.write(str(limit))
+    else:
+        res = run(["sudo", "-n", CHARGE_HELPER, str(limit)])
+        if res.returncode != 0:
+            fail("needs-setup: charge limit helper not installed (run setup.sh)", 2)
+    cfg = load_config()
+    cfg["charge"]["limit"] = limit
+    save_config(cfg)
+    return charge_state()
+
+
+def cmd_charge(args):
+    if args.action == "get":
+        st = charge_state()
+        emit(args, st, str(st["limit"]))
+        return
+    if args.action == "cycle":
+        cur = charge_state()["limit"]
+        try:
+            nxt = CHARGE_LIMITS[(CHARGE_LIMITS.index(cur) + 1) % len(CHARGE_LIMITS)]
+        except ValueError:
+            nxt = 80
+        st = charge_set(nxt)
+    else:
+        st = charge_set(args.value)
+    if not args.no_osd:
+        osd("󰂄", message=f'Charge limit {st["limit"]}%')
+    emit(args, st, str(st["limit"]))
+
+
+# --------------------------------------------------------------------------- copilot key
+
+def copilot_command(cfg):
+    cp = cfg["copilot"]
+    if cp.get("action") == "custom":
+        return cp.get("command", "")
+    return COPILOT_PRESETS.get(cp.get("action"), COPILOT_PRESETS["agent-pick"])[1]
+
+
+def cmd_copilot(args):
+    cfg = load_config()
+    if args.action == "get":
+        data = {**cfg["copilot"], "resolved": copilot_command(cfg),
+                "presets": {k: v[0] for k, v in COPILOT_PRESETS.items()}}
+        emit(args, data, data["resolved"])
+        return
+    if args.action == "run":
+        cmd = copilot_command(cfg)
+        if not cmd:
+            osd("󰚩", message="Copilot key: no command set")
+            fail("no Copilot command configured")
+        spawn(cmd)
+        return
+    # set
+    if args.preset not in COPILOT_PRESETS:
+        fail(f"unknown preset; choose from {', '.join(COPILOT_PRESETS)}")
+    cfg["copilot"]["action"] = args.preset
+    if args.preset == "custom":
+        if not args.command:
+            fail("custom needs --command")
+        cfg["copilot"]["command"] = args.command
+    else:
+        cfg["copilot"]["command"] = COPILOT_PRESETS[args.preset][1]
+    save_config(cfg)
+    emit(args, cfg["copilot"], copilot_command(cfg))
+
+
+# --------------------------------------------------------------------------- hyprland gestures
+
+def render_hypr(cfg):
+    g = cfg["gestures"]
+    b = cfg["bindings"]
+    lines = [
+        "-- Generated by vivobook-ctl. Do not edit; use the Vivobook panel or `vivobook-ctl gestures`.",
+        'o.bind("SUPER + SHIFT + F23", "Copilot key", "vivobook-ctl copilot run", { locked = true })',
+    ]
+    if b.get("dashboard", True):
+        key = str(b.get("dashboardKey", "SUPER + SHIFT + V")).replace('"', "")
+        lines.append(f'o.bind("{key}", "Vivobook control", "omarchy-shell shell toggle {PLUGIN_ID}")')
+    if g.get("workspace3"):
+        lines.append('hl.gesture({ fingers = 3, direction = "horizontal", action = "workspace" })')
+    for key, direction in (("up3", "up"), ("down3", "down")):
+        dispatcher = GESTURE_ACTIONS.get(g.get(key, "none"))
+        if dispatcher:
+            lines.append(f'hl.gesture({{ fingers = 3, direction = "{direction}", '
+                         f'action = function() hl.dispatch({dispatcher}) end }})')
+    if g.get("move4"):
+        lines.append('hl.gesture({ fingers = 4, direction = "left", action = function() hl.dispatch(hl.dsp.window.move({ workspace = "e+1" })) end })')
+        lines.append('hl.gesture({ fingers = 4, direction = "right", action = function() hl.dispatch(hl.dsp.window.move({ workspace = "e-1" })) end })')
+    if g.get("pinchFloat"):
+        lines.append('hl.gesture({ fingers = 3, direction = "pinch", action = function() hl.dispatch(hl.dsp.window.float({ action = "toggle" })) end })')
+    os.makedirs(os.path.dirname(HYPR_OUT), exist_ok=True)
+    with open(HYPR_OUT, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    return HYPR_OUT
+
+
+def hypr_reload():
+    if shutil.which("hyprctl") and os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        run(["hyprctl", "reload"])
+
+
+def cmd_gestures(args):
+    cfg = load_config()
+    g = cfg["gestures"]
+    if args.action == "get":
+        emit(args, {**g, "toggles": GESTURE_TOGGLES, "actions": list(GESTURE_ACTIONS)},
+             "\n".join(f"{k}={v}" for k, v in g.items()))
+        return
+    name, value = args.name, args.value
+    if name in GESTURE_TOGGLES:
+        if value not in ("on", "off", "true", "false"):
+            fail(f"{name} takes on|off")
+        g[name] = value in ("on", "true")
+    elif name in ("up3", "down3"):
+        if value not in GESTURE_ACTIONS:
+            fail(f"{name} takes one of {', '.join(GESTURE_ACTIONS)}")
+        g[name] = value
+    else:
+        fail(f"unknown gesture {name}")
+    save_config(cfg)
+    render_hypr(cfg)
+    hypr_reload()
+    emit(args, g, f"{name}={g[name]}")
+
+
+def cmd_render_hypr(args):
+    path = render_hypr(load_config())
+    if not args.no_reload:
+        hypr_reload()
+    emit(args, {"path": path}, path)
+
+
+# --------------------------------------------------------------------------- edge gestures daemon
+
+def edge_state():
+    cfg = load_config()
+    unit = user_unit_state("vivobook-edged.service")["vivobook-edged.service"]
+    return {**cfg["edge"], "daemon": unit}
+
+
+def cmd_edge(args):
+    cfg = load_config()
+    if args.action == "status":
+        st = edge_state()
+        emit(args, st, st["daemon"])
+        return
+    if args.action == "toggle":
+        args.action = "disable" if edge_state()["daemon"] == "active" else "enable"
+    if args.action in ("enable", "disable"):
+        cfg["edge"]["enabled"] = args.action == "enable"
+        save_config(cfg)
+        flag = "enable" if args.action == "enable" else "disable"
+        res = run(["systemctl", "--user", flag, "--now", "vivobook-edged.service"])
+        if res.returncode != 0:
+            fail(res.stderr.strip() or "systemctl failed (run setup.sh first)", 2)
+        if not args.no_osd:
+            osd("touchpad", message=f"Edge gestures {'on' if cfg['edge']['enabled'] else 'off'}")
+    elif args.action == "set":
+        key, value = args.name, args.value
+        if key in ("zonePct", "stepPx", "deadzoneBottomPct"):
+            cfg["edge"][key] = int(value)
+        elif key in ("right", "left", "top"):
+            cfg["edge"][key] = value
+        else:
+            fail(f"unknown edge setting {key}")
+        save_config(cfg)
+        run(["systemctl", "--user", "kill", "-s", "HUP", "vivobook-edged.service"])
+    st = edge_state()
+    emit(args, st, st["daemon"])
+
+
+# --------------------------------------------------------------------------- status / doctor / apply
+
+def capabilities(charge=None):
+    hid = lamparray.find_device_path()
+    touchpad = touchpad_event()
+    charge = charge or charge_state()
+    return {
+        "kbd": kbd_led() is not None and shutil.which("brightnessctl") is not None,
+        "rgbDevice": hid is not None,
+        "rgb": bool(hid) and os.access(hid, os.R_OK | os.W_OK),
+        "profile": os.path.exists(PLATFORM_PROFILE),
+        "charge": charge["writable"],
+        "chargeDevice": os.path.exists(CHARGE_ATTR),
+        "uinput": os.access("/dev/uinput", os.R_OK | os.W_OK),
+        "touchpad": bool(touchpad) and os.access(touchpad, os.R_OK),
+        "evdev": python_has("evdev"),
+        "rules": os.path.exists(UDEV_RULES),
+    }
+
+
+def python_has(module):
+    try:
+        __import__(module)
+        return True
+    except ImportError:
+        return False
+
+
+def touchpad_event():
+    for dev in glob.glob("/sys/class/input/event*"):
+        if read_file(os.path.join(dev, "device", "name")) == TOUCHPAD_NAME:
+            return "/dev/" + os.path.basename(dev)
+    return None
+
+
+def model_name():
+    name = read_file("/sys/class/dmi/id/product_family") or read_file("/sys/class/dmi/id/product_name") or "ASUS laptop"
+    return name.replace("ASUS ", "", 1)
+
+
+def status():
+    cfg = load_config()
+    charge = charge_state()
+    caps = capabilities(charge)
+    caps["setupDone"] = caps["rules"] and caps["rgb"] and caps["charge"]
+    units = user_unit_state("vivobook-rgbd.service", "vivobook-edged.service")
+    cached = lamparray._read_cache() or {}
+    return {
+        "model": model_name(),
+        "pluginId": PLUGIN_ID,
+        "caps": caps,
+        "kbd": kbd_state(),
+        "rgb": {**cfg["rgb"], "daemon": units["vivobook-rgbd.service"],
+                "lampCount": cached.get("lampCount"), "presets": COLOR_PRESETS, "modes": RGB_MODES},
+        "profile": profile_state(),
+        "charge": {**charge, "saved": cfg["charge"]["limit"], "limits": CHARGE_LIMITS},
+        "copilot": {**cfg["copilot"], "resolved": copilot_command(cfg),
+                    "presets": [{"value": k, "label": v[0]} for k, v in COPILOT_PRESETS.items()]},
+        "gestures": {**cfg["gestures"], "actions": list(GESTURE_ACTIONS)},
+        "edge": {**cfg["edge"], "daemon": units["vivobook-edged.service"]},
+        "setupCommand": f"sudo {os.path.join(HOME, '.config/omarchy/plugins', PLUGIN_ID, 'setup.sh')}",
+    }
+
+
+def cmd_status(args):
+    st = status()
+    print(json.dumps(st) if args.json else json.dumps(st, indent=2))
+
+
+def cmd_doctor(args):
+    st = status()
+    caps = st["caps"]
+    rows = [
+        ("Keyboard backlight (brightnessctl)", caps["kbd"], "install brightnessctl"),
+        ("RGB controller present", caps["rgbDevice"], "no ITE LampArray HID device found"),
+        ("RGB controller writable", caps["rgb"], "run setup.sh (udev uaccess rule for hidraw)"),
+        ("Performance profile", caps["profile"], "asus-wmi platform_profile missing"),
+        ("Charge limit writable", caps["charge"], "run setup.sh (root helper + sudoers)"),
+        ("uinput writable (edge gestures)", caps["uinput"], "run setup.sh (udev uaccess rule for uinput)"),
+        ("Touchpad readable (edge gestures)", caps["touchpad"], "run setup.sh (udev uaccess rule for touchpad)"),
+        ("python-evdev installed", caps["evdev"], "sudo pacman -S python-evdev"),
+        ("RGB daemon", st["rgb"]["daemon"] == "active", "systemctl --user enable --now vivobook-rgbd"),
+        ("Hyprland config rendered", os.path.exists(HYPR_OUT), "vivobook-ctl render-hypr"),
+    ]
+    for label, ok, hint in rows:
+        print(f"[{'ok' if ok else '--'}] {label}" + ("" if ok else f"  -> {hint}"))
+    print(f"\nmodel: {st['model']}  kbd: {st['kbd']['level']}/{st['kbd']['max']}  "
+          f"profile: {st['profile']['platform']}  charge limit: {st['charge']['limit']}  "
+          f"rgb: {st['rgb']['mode']} #{st['rgb']['color']}")
+
+
+def cmd_apply(args):
+    """Re-apply persisted state after login or resume."""
+    cfg = load_config()
+    out = {}
+    st = kbd_state()
+    if st["available"]:
+        run(["brightnessctl", "-q", "-d", st["device"], "set", str(cfg["kbd"]["level"])])
+        out["kbd"] = cfg["kbd"]["level"]
+    if charge_state()["available"] and charge_state()["limit"] != cfg["charge"]["limit"]:
+        try:
+            charge_set(cfg["charge"]["limit"])
+            out["charge"] = cfg["charge"]["limit"]
+        except SystemExit:
+            out["charge"] = "needs-setup"
+    if lamparray.device_accessible():
+        try:
+            out["rgb"] = rgb_daemon_notify()
+        except SystemExit:
+            out["rgb"] = "failed"
+    render_hypr(cfg)
+    emit(args, out, json.dumps(out))
+
+
+# --------------------------------------------------------------------------- argparse
+
+def add_common(p):
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--no-osd", action="store_true", help="do not show the on-screen display")
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="vivobook-ctl", description=__doc__.split("\n")[0])
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("status", help="everything the panel shows, as JSON"); add_common(p)
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("kbd", help="keyboard backlight level"); add_common(p)
+    p.add_argument("action", choices=["get", "set", "up", "down", "cycle"])
+    p.add_argument("value", nargs="?", type=int)
+    p.set_defaults(func=cmd_kbd)
+
+    p = sub.add_parser("rgb", help="keyboard RGB color and effect")
+    ps = p.add_subparsers(dest="action", required=True)
+    for name in ("info", "get", "next", "off", "auto"):
+        add_common(ps.add_parser(name))
+    q = ps.add_parser("set"); q.add_argument("color"); q.add_argument("--intensity", type=int); add_common(q)
+    q = ps.add_parser("effect"); q.add_argument("mode", choices=RGB_MODES); q.add_argument("--speed", type=float); add_common(q)
+    p.set_defaults(func=cmd_rgb)
+
+    p = sub.add_parser("profile", help="performance profile"); add_common(p)
+    p.add_argument("action", choices=["get", "set", "cycle"])
+    p.add_argument("value", nargs="?", choices=PROFILES)
+    p.set_defaults(func=cmd_profile)
+
+    p = sub.add_parser("charge", help="battery charge limit"); add_common(p)
+    p.add_argument("action", choices=["get", "set", "cycle"])
+    p.add_argument("value", nargs="?", type=int)
+    p.set_defaults(func=cmd_charge)
+
+    p = sub.add_parser("copilot", help="Copilot key action")
+    ps = p.add_subparsers(dest="action", required=True)
+    add_common(ps.add_parser("get")); add_common(ps.add_parser("run"))
+    q = ps.add_parser("set"); q.add_argument("preset", choices=list(COPILOT_PRESETS)); q.add_argument("--command"); add_common(q)
+    p.set_defaults(func=cmd_copilot)
+
+    p = sub.add_parser("gestures", help="Hyprland touchpad gestures"); add_common(p)
+    p.add_argument("action", choices=["get", "set"])
+    p.add_argument("name", nargs="?"); p.add_argument("value", nargs="?")
+    p.set_defaults(func=cmd_gestures)
+
+    p = sub.add_parser("edge", help="ASUS-style edge slide gestures daemon"); add_common(p)
+    p.add_argument("action", choices=["status", "enable", "disable", "toggle", "set"])
+    p.add_argument("name", nargs="?"); p.add_argument("value", nargs="?")
+    p.set_defaults(func=cmd_edge)
+
+    p = sub.add_parser("render-hypr", help="write the generated Hyprland Lua"); add_common(p)
+    p.add_argument("--no-reload", action="store_true")
+    p.set_defaults(func=cmd_render_hypr)
+
+    p = sub.add_parser("apply", help="re-apply saved state (login/resume)"); add_common(p)
+    p.set_defaults(func=cmd_apply)
+
+    p = sub.add_parser("doctor", help="capability report"); add_common(p)
+    p.set_defaults(func=cmd_doctor)
+    return parser
+
+
+def main():
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    args = build_parser().parse_args()
+    if args.cmd == "gestures" and args.action == "set" and (not args.name or not args.value):
+        fail("gestures set <name> <value>")
+    if args.cmd in ("kbd", "charge") and args.action == "set" and args.value is None:
+        fail(f"{args.cmd} set needs a value")
+    if args.cmd == "profile" and args.action == "set" and not args.value:
+        fail("profile set needs quiet|balanced|performance")
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

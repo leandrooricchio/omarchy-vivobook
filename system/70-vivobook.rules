@@ -1,0 +1,16 @@
+# Vivobook Control (io.github.leandrooricchio.vivobook)
+# uaccess grants the logged-in seat user an ACL on the node: no groups, no re-login.
+# Must sort before 73-seat-late.rules for the uaccess tag to be honored.
+
+# ITE5570 keyboard RGB controller (HID LampArray) over I2C-HID
+SUBSYSTEM=="hidraw", KERNELS=="0018:0B05:19B6.*", TAG+="uaccess", MODE="0660"
+SUBSYSTEM=="hidraw", KERNELS=="0018:0B05:5570.*", TAG+="uaccess", MODE="0660"
+
+# uinput, used by vivobook-edged to re-emit touchpad events
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", MODE="0660"
+
+# ELAN touchpad event node, grabbed by vivobook-edged for edge slide gestures
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="ASCE1200:00 04F3:32E2 Touchpad", TAG+="uaccess"
+
+# The uinput clone must be classified as a touchpad by libinput
+SUBSYSTEM=="input", ATTRS{name}=="Vivobook Edge Touchpad", ENV{ID_INPUT}="1", ENV{ID_INPUT_TOUCHPAD}="1"

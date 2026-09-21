@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+"""vivobook-edged - ASUS-style touchpad edge slides for Linux.
+
+Grabs the ELAN touchpad, re-emits every event through a uinput clone (so
+Hyprland/libinput keep a normal touchpad), and intercepts a single finger
+that lands on an edge zone and slides along it:
+
+  right edge, slide up/down   -> screen brightness
+  left edge,  slide up/down   -> volume
+  top edge,   slide left/right-> browser back / forward
+
+Everything else (taps in the zone, two-finger scroll, clicks) is passed
+through untouched, with at most a short delay while a touch is being judged.
+Needs python-evdev and read access to the touchpad + /dev/uinput (setup.sh).
+"""
+
+import glob
+import json
+import os
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+try:
+    import evdev
+    from evdev import ecodes as E
+except ImportError:
+    print("python-evdev is not installed (sudo pacman -S python-evdev)", file=sys.stderr)
+    sys.exit(3)
+
+CONFIG_PATH = os.path.expanduser("~/.config/omarchy/vivobook/config.json")
+TOUCHPAD_NAME = "ASCE1200:00 04F3:32E2 Touchpad"
+CLONE_NAME = "Vivobook Edge Touchpad"
+DEFAULTS = {"zonePct": 4, "stepPx": 40, "deadzoneBottomPct": 15,
+            "right": "brightness", "left": "volume", "top": "history"}
+CANDIDATE_TIMEOUT = 0.15   # seconds a zone touch may sit still before it is passed through
+DEBOUNCE = 0.06            # seconds between dispatched actions
+RETRY_SECONDS = 3
+
+ACTIONS = {
+    "brightness": (["omarchy-brightness-display", "+5%"], ["omarchy-brightness-display", "5%-"]),
+    "volume": (["omarchy-audio-output-volume", "raise"], ["omarchy-audio-output-volume", "lower"]),
+    "history": (["wtype", "-k", "XF86Forward"], ["wtype", "-k", "XF86Back"]),
+    "none": (None, None),
+}
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def load_edge_config():
+    try:
+        with open(CONFIG_PATH) as f:
+            data = json.load(f).get("edge", {})
+    except (OSError, ValueError):
+        data = {}
+    return {**DEFAULTS, **data}
+
+
+def find_touchpad():
+    for path in sorted(glob.glob("/dev/input/event*")):
+        try:
+            dev = evdev.InputDevice(path)
+        except OSError:
+            continue
+        if dev.name == TOUCHPAD_NAME:
+            return dev
+        dev.close()
+    return None
+
+
+class Slot:
+    __slots__ = ("id", "x", "y")
+
+    def __init__(self):
+        self.id, self.x, self.y = -1, 0, 0
+
+
+class EdgeDaemon:
+    def __init__(self):
+        self.cfg = load_edge_config()
+        self.stop = False
+        self.reload = False
+        self.dev = None
+        self.ui = None
+        signal.signal(signal.SIGTERM, self._term)
+        signal.signal(signal.SIGINT, self._term)
+        signal.signal(signal.SIGHUP, self._hup)
+
+    def _term(self, *_):
+        self.stop = True
+
+    def _hup(self, *_):
+        self.reload = True
+
+    # ----------------------------------------------------------------- device
+
+    def open(self):
+        dev = find_touchpad()
+        if not dev:
+            log("touchpad not found; retrying")
+            return False
+        try:
+            self.ui = evdev.UInput.from_device(dev, name=CLONE_NAME, input_props=dev.input_props())
+            dev.grab()
+        except OSError as e:
+            log(f"cannot create clone / grab: {e}")
+            dev.close()
+            self.ui = None
+            return False
+        self.dev = dev
+        caps = dev.capabilities(absinfo=True)
+        absmap = {code: info for code, info in caps.get(E.EV_ABS, [])}
+        self.xinfo = absmap.get(E.ABS_MT_POSITION_X) or absmap.get(E.ABS_X)
+        self.yinfo = absmap.get(E.ABS_MT_POSITION_Y) or absmap.get(E.ABS_Y)
+        self.slots = [Slot() for _ in range(max(2, (absmap.get(E.ABS_MT_SLOT).max + 1) if absmap.get(E.ABS_MT_SLOT) else 10))]
+        self.cur_slot = 0
+        self.reset_gesture()
+        self.apply_config()
+        log(f"grabbed {dev.path} ({dev.name}); clone at {self.ui.device.path}; "
+            f"x {self.xinfo.min}-{self.xinfo.max} y {self.yinfo.min}-{self.yinfo.max}")
+        return True
+
+    def close(self):
+        if self.dev:
+            try:
+                self.dev.ungrab()
+            except OSError:
+                pass
+            self.dev.close()
+            self.dev = None
+        if self.ui:
+            self.ui.close()
+            self.ui = None
+
+    def apply_config(self):
+        self.cfg = load_edge_config()
+        xr = self.xinfo.max - self.xinfo.min
+        yr = self.yinfo.max - self.yinfo.min
+        pct = max(1, min(20, int(self.cfg["zonePct"]))) / 100.0
+        self.zone_x = xr * pct
+        self.zone_y = yr * pct
+        self.dead_y = self.yinfo.max - yr * max(0, min(50, int(self.cfg["deadzoneBottomPct"]))) / 100.0
+        self.step = max(10, int(self.cfg["stepPx"]))
+
+    # ----------------------------------------------------------------- gesture state
+
+    def reset_gesture(self):
+        self.state = "idle"       # idle | candidate | gesture | passthrough
+        self.zone = None
+        self.buffer = []
+        self.t0 = 0.0
+        self.start = (0, 0)
+        self.last_axis = 0
+        self.accum = 0.0
+        self.last_dispatch = 0.0
+
+    def fingers(self):
+        return sum(1 for s in self.slots if s.id >= 0)
+
+    def touching_slot(self):
+        for s in self.slots:
+            if s.id >= 0:
+                return s
+        return None
+
+    def zone_at(self, x, y):
+        if y <= self.yinfo.min + self.zone_y and self.cfg.get("top", "none") != "none":
+            return "top"
+        if y < self.dead_y:
+            if x >= self.xinfo.max - self.zone_x and self.cfg.get("right", "none") != "none":
+                return "right"
+            if x <= self.xinfo.min + self.zone_x and self.cfg.get("left", "none") != "none":
+                return "left"
+        return None
+
+    def axis_pos(self, s):
+        # Along-edge coordinate: y for side edges (up is positive), x for the top edge.
+        return -s.y if self.zone in ("right", "left") else s.x
+
+    def perp_drift(self, s):
+        return abs(s.x - self.start[0]) if self.zone in ("right", "left") else abs(s.y - self.start[1])
+
+    def dispatch(self, direction):
+        now = time.monotonic()
+        if now - self.last_dispatch < DEBOUNCE:
+            return
+        self.last_dispatch = now
+        action = self.cfg.get(self.zone, "none")
+        up, down = ACTIONS.get(action, ACTIONS["none"])
+        cmd = up if direction > 0 else down
+        if not cmd or not shutil.which(cmd[0]):
+            return
+        subprocess.Popen(cmd, start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # ----------------------------------------------------------------- event plumbing
+
+    def forward(self, frame):
+        for ev in frame:
+            self.ui.write_event(ev)
+        self.ui.syn()
+
+    def flush(self):
+        for frame in self.buffer:
+            self.forward(frame)
+        self.buffer = []
+
+    def track(self, frame):
+        """Update slot state from one frame; return True if a button was pressed."""
+        clicked = False
+        for ev in frame:
+            if ev.type == E.EV_ABS:
+                if ev.code == E.ABS_MT_SLOT:
+                    self.cur_slot = min(ev.value, len(self.slots) - 1)
+                elif ev.code == E.ABS_MT_TRACKING_ID:
+                    self.slots[self.cur_slot].id = ev.value
+                elif ev.code == E.ABS_MT_POSITION_X:
+                    self.slots[self.cur_slot].x = ev.value
+                elif ev.code == E.ABS_MT_POSITION_Y:
+                    self.slots[self.cur_slot].y = ev.value
+            elif ev.type == E.EV_KEY and ev.code == E.BTN_LEFT and ev.value == 1:
+                clicked = True
+        return clicked
+
+    def handle_frame(self, frame):
+        was_touching = self.fingers() > 0
+        clicked = self.track(frame)
+        n = self.fingers()
+
+        if self.state == "idle":
+            if not was_touching and n == 1:
+                s = self.touching_slot()
+                zone = self.zone_at(s.x, s.y)
+                if zone:
+                    self.state = "candidate"
+                    self.zone = zone
+                    self.buffer = [frame]
+                    self.t0 = time.monotonic()
+                    self.start = (s.x, s.y)
+                    self.last_axis = self.axis_pos(s)
+                    return
+            self.forward(frame)
+            if n > 0:
+                self.state = "passthrough"
+            return
+
+        if self.state == "passthrough":
+            self.forward(frame)
+            if n == 0:
+                self.reset_gesture()
+            return
+
+        if self.state == "candidate":
+            self.buffer.append(frame)
+            s = self.touching_slot()
+            if n != 1 or clicked or s is None:
+                self.flush()
+                self.state = "idle" if n == 0 else "passthrough"
+                if n == 0:
+                    self.reset_gesture()
+                return
+            travel = self.axis_pos(s) - self.last_axis
+            threshold = 1.5 * (self.zone_y if self.zone == "top" else self.zone_x)
+            if self.perp_drift(s) > (self.zone_x if self.zone in ("right", "left") else self.zone_y):
+                self.flush()
+                self.state = "passthrough"
+                return
+            if abs(travel) >= threshold:
+                self.buffer = []          # swallow the touch: uinput never saw it
+                self.state = "gesture"
+                self.last_axis = self.axis_pos(s)
+                self.accum = 0.0
+                self.dispatch(1 if travel > 0 else -1)
+            return
+
+        if self.state == "gesture":
+            if n == 0:
+                self.reset_gesture()
+                return
+            if n > 1:
+                return                    # keep swallowing until all fingers lift
+            s = self.touching_slot()
+            pos = self.axis_pos(s)
+            self.accum += pos - self.last_axis
+            self.last_axis = pos
+            while abs(self.accum) >= self.step:
+                self.dispatch(1 if self.accum > 0 else -1)
+                self.accum -= self.step if self.accum > 0 else -self.step
+
+    def check_timeout(self):
+        if self.state == "candidate" and time.monotonic() - self.t0 > CANDIDATE_TIMEOUT:
+            self.flush()
+            self.state = "passthrough"
+
+    # ----------------------------------------------------------------- main loop
+
+    def run(self):
+        frame = []
+        while not self.stop:
+            if not self.dev and not self.open():
+                time.sleep(RETRY_SECONDS)
+                continue
+            if self.reload:
+                self.reload = False
+                self.apply_config()
+                log(f"config reloaded: {self.cfg}")
+            try:
+                r, _, _ = select.select([self.dev.fd], [], [], 0.05)
+                if not r:
+                    self.check_timeout()
+                    continue
+                for ev in self.dev.read():
+                    if ev.type == E.EV_SYN and ev.code == E.SYN_REPORT:
+                        self.handle_frame(frame)
+                        frame = []
+                    else:
+                        frame.append(ev)
+            except OSError as e:
+                log(f"device lost ({e}); reopening")
+                self.close()
+                frame = []
+                self.reset_gesture()
+                time.sleep(1)
+        log("stopping; releasing touchpad")
+        self.close()
+
+
+if __name__ == "__main__":
+    EdgeDaemon().run()

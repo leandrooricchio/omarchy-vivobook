@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""vivobook-rgbd - keeps the keyboard RGB in the configured state.
+
+Runs as a systemd --user service. Static colors are applied once; breathing
+and rainbow are animated here so they survive without the shell. SIGHUP
+re-reads ~/.config/omarchy/vivobook/config.json (vivobook-ctl sends it after
+every change). After a suspend/resume the controller is re-opened and the
+state re-applied.
+"""
+
+import colorsys
+import json
+import math
+import os
+import signal
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import lamparray  # noqa: E402
+
+CONFIG_PATH = os.path.expanduser("~/.config/omarchy/vivobook/config.json")
+DEFAULT_RGB = {"mode": "static", "color": "7AA2F7", "intensity": 255, "speed": 1.0}
+RETRY_SECONDS = 10
+FRAME_SECONDS = 1 / 20
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def load_rgb():
+    try:
+        with open(CONFIG_PATH) as f:
+            data = json.load(f).get("rgb", {})
+    except (OSError, ValueError):
+        data = {}
+    return {**DEFAULT_RGB, **data}
+
+
+class Daemon:
+    def __init__(self):
+        self.reload = True
+        self.stop = False
+        self.rgb = load_rgb()
+        self.device = None
+        self.last_wall = time.time()
+        self.last_mono = time.monotonic()
+        signal.signal(signal.SIGHUP, self._on_hup)
+        signal.signal(signal.SIGTERM, self._on_term)
+        signal.signal(signal.SIGINT, self._on_term)
+
+    def _on_hup(self, *_):
+        self.reload = True
+
+    def _on_term(self, *_):
+        self.stop = True
+
+    def open(self):
+        if self.device:
+            return True
+        try:
+            self.device = lamparray.LampArray()
+            attrs = self.device.attributes()
+            log(f"opened {self.device.path}: {attrs['lampCount']} lamps, "
+                f"min interval {attrs['minUpdateIntervalUs']} us")
+            return True
+        except (lamparray.LampArrayError, OSError) as e:
+            log(f"controller unavailable: {e}; retrying in {RETRY_SECONDS}s")
+            self.device = None
+            return False
+
+    def close(self):
+        if self.device:
+            try:
+                self.device.close()
+            except OSError:
+                pass
+            self.device = None
+
+    def resumed(self):
+        """Wall clock jumped ahead of the monotonic clock: we slept."""
+        wall, mono = time.time(), time.monotonic()
+        jumped = (wall - self.last_wall) - (mono - self.last_mono) > 3
+        self.last_wall, self.last_mono = wall, mono
+        return jumped
+
+    def paint(self, r, g, b):
+        try:
+            self.device.set_all(int(r), int(g), int(b), int(self.rgb.get("intensity", 255)))
+            return True
+        except OSError as e:
+            log(f"write failed: {e}; reopening")
+            self.close()
+            return False
+
+    def sleep(self, seconds):
+        """Sleep in small slices so signals are noticed promptly."""
+        end = time.monotonic() + seconds
+        while not self.stop and not self.reload:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.25, remaining))
+
+    def run(self):
+        phase = 0.0
+        applied_static = False
+        while not self.stop:
+            if self.reload:
+                self.reload = False
+                self.rgb = load_rgb()
+                applied_static = False
+                log(f"mode={self.rgb['mode']} color={self.rgb['color']} speed={self.rgb['speed']}")
+            if self.resumed():
+                log("resume detected; re-applying")
+                self.close()
+                applied_static = False
+            if not self.open():
+                self.sleep(RETRY_SECONDS)
+                continue
+
+            mode = self.rgb["mode"]
+            speed = max(0.1, float(self.rgb.get("speed", 1.0)))
+            try:
+                base = lamparray.hex_to_rgb(self.rgb.get("color", "FFFFFF"))
+            except ValueError:
+                base = (255, 255, 255)
+
+            if mode == "auto":
+                if not applied_static:
+                    try:
+                        self.device.autonomous()
+                        applied_static = True
+                    except OSError:
+                        self.close()
+                self.sleep(60)
+            elif mode == "off":
+                if not applied_static:
+                    applied_static = self.paint(0, 0, 0)
+                self.sleep(60)
+            elif mode == "breathing":
+                phase += FRAME_SECONDS * speed
+                level = 0.12 + 0.88 * (1 + math.sin(phase * math.pi)) / 2
+                self.paint(*(c * level for c in base))
+                self.sleep(FRAME_SECONDS)
+            elif mode == "rainbow":
+                phase = (phase + FRAME_SECONDS * speed / 10) % 1.0
+                r, g, b = colorsys.hsv_to_rgb(phase, 1.0, 1.0)
+                self.paint(r * 255, g * 255, b * 255)
+                self.sleep(FRAME_SECONDS)
+            else:  # static
+                if not applied_static:
+                    applied_static = self.paint(*base)
+                self.sleep(60)
+        log("stopping; leaving current color")
+        self.close()
+
+
+if __name__ == "__main__":
+    Daemon().run()

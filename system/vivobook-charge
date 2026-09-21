@@ -1,0 +1,28 @@
+#!/bin/bash
+# Root helper: set the battery charge end threshold and remember it for boot.
+# Installed to /usr/local/libexec/vivobook-charge, allowed via /etc/sudoers.d/vivobook.
+# Accepts exactly one of 60|80|100 (or "restore" to re-apply the saved value).
+set -euo pipefail
+
+attr=/sys/class/power_supply/BAT0/charge_control_end_threshold
+saved=/etc/vivobook/charge-limit
+
+case "${1:-}" in
+  60|80|100)
+    limit=$1
+    mkdir -p "$(dirname "$saved")"
+    printf '%s\n' "$limit" >"$saved"
+    ;;
+  restore)
+    [[ -r $saved ]] || exit 0
+    limit=$(<"$saved")
+    [[ $limit =~ ^(60|80|100)$ ]] || exit 1
+    ;;
+  *)
+    echo "Usage: vivobook-charge <60|80|100|restore>" >&2
+    exit 1
+    ;;
+esac
+
+[[ -w $attr ]] || { echo "no charge_control_end_threshold on this system" >&2; exit 1; }
+printf '%s\n' "$limit" >"$attr"

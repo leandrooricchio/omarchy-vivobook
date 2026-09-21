@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.leandrooricchio.vivobook",
+  "name": "Vivobook Control",
+  "version": "0.1.0",
+  "author": "Leandro Oricchio",
+  "license": "MIT",
+  "description": "ASUS Vivobook S 14 controls: keyboard backlight and RGB, performance mode, charge limit, Copilot key and touchpad gestures in one Omarchy panel.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Vivobook",
+    "description": "Laptop hardware dashboard: keyboard light and RGB, performance profile, charge limit, Copilot key, touchpad gestures.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showKbdLevelInBar": false
+    },
+    "schema": [
+      {
+        "key": "showKbdLevelInBar",
+        "type": "enum",
+        "label": "Show keyboard light level in the bar",
+        "options": ["false", "true"],
+        "defaultValue": "false"
+      }
+    ]
+  }
+}

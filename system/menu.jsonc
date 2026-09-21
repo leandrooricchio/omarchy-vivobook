@@ -1,0 +1,3 @@
+  "trigger.hardware.vivobook": {"icon": "󰌌", "label": "Vivobook Control", "action": "omarchy-shell shell toggle io.github.leandrooricchio.vivobook"},
+  "trigger.hardware.vivobook-rgb": {"icon": "󰌁", "label": "Keyboard RGB Next Color", "action": "vivobook-ctl rgb next"},
+  "trigger.hardware.vivobook-edge": {"icon": "󰟸", "label": "Touchpad Edge Gestures", "checked": "[[ $(vivobook-ctl edge status) == active ]]", "action": "vivobook-ctl edge toggle"},
