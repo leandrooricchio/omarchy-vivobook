@@ -10,7 +10,7 @@ control is also reachable from keybindings, the Omarchy menu and the command lin
 | Keyboard RGB color and effects | HID LampArray reports to the ITE5570 controller (`/dev/hidraw*`), driven by a small user daemon (`vivobook-rgbd`) for breathing/rainbow |
 | Performance profile | `power-profiles-daemon` through `omarchy-powerprofiles-set` (quiet / balanced / performance) — CPU temperature and fan RPM shown read-only |
 | Battery charge limit (60 / 80 / 100 %) | `charge_control_end_threshold` via a tiny root helper, restored at boot and after resume |
-| Copilot key | The key emits `Meta+Shift+F23`; a generated Hyprland bind runs the action you pick (default: launch your default Omarchy agent) |
+| Copilot key | The key emits `Meta+Shift+F23` (keycode 201). Omarchy binds it to its menu by default; the generated Hyprland file takes the key over and runs the action you pick (default: launch your default Omarchy agent) |
 | Touchpad gestures | Generated `hl.gesture(...)` rules: 3-finger swipe ↔ workspaces, 3-finger ↑/↓ actions, 4-finger ↔ move window, pinch to float |
 | ASUS edge slides | `vivobook-edged` grabs the touchpad, re-emits it through uinput, and turns single-finger slides on the right edge (brightness), left edge (volume) and top edge (back/forward) into actions |
 
