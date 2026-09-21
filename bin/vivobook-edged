@@ -121,8 +121,10 @@ class EdgeDaemon:
         self.cur_slot = 0
         self.reset_gesture()
         self.apply_config()
-        log(f"grabbed {dev.path} ({dev.name}); clone at {self.ui.device.path}; "
-            f"x {self.xinfo.min}-{self.xinfo.max} y {self.yinfo.min}-{self.yinfo.max}")
+        clone = self.ui.device.path if getattr(self.ui, "device", None) else CLONE_NAME
+        log(f"grabbed {dev.path} ({dev.name}); clone {clone}; "
+            f"x {self.xinfo.min}-{self.xinfo.max} y {self.yinfo.min}-{self.yinfo.max}; "
+            f"zones {self.zone_x:.0f}px/{self.zone_y:.0f}px step {self.step}px")
         return True
 
     def close(self):
