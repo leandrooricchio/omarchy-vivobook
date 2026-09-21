@@ -8,9 +8,14 @@ TARGET_USER="${SUDO_USER:-}"
 [[ -n $TARGET_USER && $TARGET_USER != root ]] || { echo "SUDO_USER unset" >&2; exit 1; }
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 TARGET_UID="$(id -u "$TARGET_USER")"
+# sudo resets the environment, so rebuild what the user session commands need:
+# Omarchy's bin dir, the user bus, and the running Hyprland instance.
+HYPR_SIG="$(ls -1 "/run/user/$TARGET_UID/hypr" 2>/dev/null | head -n1)"
 as_user() {
   sudo -u "$TARGET_USER" env HOME="$TARGET_HOME" XDG_RUNTIME_DIR="/run/user/$TARGET_UID" \
-    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$TARGET_UID/bus" PATH="$TARGET_HOME/.local/bin:$PATH" "$@"
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$TARGET_UID/bus" \
+    HYPRLAND_INSTANCE_SIGNATURE="$HYPR_SIG" OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}" \
+    PATH="$TARGET_HOME/.local/bin:${OMARCHY_PATH:-/usr/share/omarchy}/bin:$PATH" "$@"
 }
 
 as_user systemctl --user disable --now vivobook-rgbd.service vivobook-apply.service vivobook-edged.service 2>/dev/null || true

@@ -23,9 +23,14 @@ TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 TARGET_UID="$(id -u "$TARGET_USER")"
 PLUGIN_DIR="$TARGET_HOME/.config/omarchy/plugins/$PLUGIN_ID"
 
+# sudo resets the environment, so rebuild what the user session commands need:
+# Omarchy's bin dir, the user bus, and the running Hyprland instance.
+HYPR_SIG="$(ls -1 "/run/user/$TARGET_UID/hypr" 2>/dev/null | head -n1)"
 as_user() {
   sudo -u "$TARGET_USER" env HOME="$TARGET_HOME" XDG_RUNTIME_DIR="/run/user/$TARGET_UID" \
-    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$TARGET_UID/bus" PATH="$TARGET_HOME/.local/bin:$PATH" "$@"
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$TARGET_UID/bus" \
+    HYPRLAND_INSTANCE_SIGNATURE="$HYPR_SIG" OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}" \
+    PATH="$TARGET_HOME/.local/bin:${OMARCHY_PATH:-/usr/share/omarchy}/bin:$PATH" "$@"
 }
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
