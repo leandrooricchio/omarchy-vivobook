@@ -47,7 +47,7 @@ pacman -S --needed --noconfirm python-evdev brightnessctl wtype
 step "Installing udev rules"
 install -Dm644 "$SRC/system/70-vivobook.rules" /etc/udev/rules.d/70-vivobook.rules
 udevadm control --reload
-udevadm trigger --subsystem-match=hidraw --subsystem-match=misc --subsystem-match=input --action=add
+udevadm trigger --subsystem-match=hidraw --subsystem-match=misc --subsystem-match=input --action=change
 
 step "Installing charge limit helper"
 install -Dm755 "$SRC/system/vivobook-charge" /usr/local/libexec/vivobook-charge
