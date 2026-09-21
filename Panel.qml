@@ -257,7 +257,8 @@ Panel {
         required property int index
         width: seg.cellWidth
         text: String(modelData.label !== undefined ? modelData.label : modelData)
-        iconText: modelData.icon ? String(modelData.icon) : ""
+        // Icons only when the cell has room for glyph + label.
+        iconText: modelData.icon && seg.cellWidth >= Style.space(96) ? String(modelData.icon) : ""
         iconSize: seg.iconSize
         fontSize: seg.fontSize
         foreground: root.fg
