@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.leandrooricchio.vivobook",
   "name": "Vivobook Control",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "Leandro Oricchio",
   "license": "MIT",
   "description": "ASUS Vivobook S 14 controls: keyboard backlight and RGB, performance mode, charge limit, Copilot key and touchpad gestures in one Omarchy panel.",

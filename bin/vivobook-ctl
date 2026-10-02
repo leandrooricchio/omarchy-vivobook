@@ -614,6 +614,16 @@ def cmd_status(args):
     print(json.dumps(st) if args.json else json.dumps(st, indent=2))
 
 
+def setup_version_current():
+    """True when the root-installed payload was set up by this plugin version."""
+    try:
+        installed = open("/etc/vivobook/setup-version").read().strip()
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "manifest.json")) as f:
+            return installed == json.load(f)["version"]
+    except (OSError, ValueError, KeyError):
+        return False
+
+
 def cmd_doctor(args):
     st = status()
     caps = st["caps"]
@@ -626,6 +636,7 @@ def cmd_doctor(args):
         ("uinput writable (edge gestures)", caps["uinput"], "run setup.sh (udev uaccess rule for uinput)"),
         ("Touchpad readable (edge gestures)", caps["touchpad"], "run setup.sh (udev uaccess rule for touchpad)"),
         ("python-evdev installed", caps["evdev"], "sudo pacman -S python-evdev"),
+        ("Root-installed files match this version", setup_version_current(), "re-run setup.sh after a plugin update"),
         ("RGB daemon", st["rgb"]["daemon"] == "active", "systemctl --user enable --now vivobook-rgbd"),
         ("Hyprland config rendered", os.path.exists(HYPR_OUT), "vivobook-ctl render-hypr"),
     ]

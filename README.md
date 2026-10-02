@@ -23,6 +23,10 @@ omarchy plugin add https://github.com/leandrooricchio/omarchy-vivobook.git --ena
 sudo ~/.config/omarchy/plugins/io.github.leandrooricchio.vivobook/setup.sh
 ```
 
+`setup.sh` shows the digest of its payload (`SHA256SUMS`) and asks for confirmation. Compare it with
+the digest in the release notes, or pin it up front with `setup.sh --expect <sha256>` (see
+[Privilege boundary](#privilege-boundary)).
+
 The plugin works immediately for the keyboard light, performance profile, Copilot key and
 Hyprland gestures. `setup.sh` (one time, with sudo) unlocks the rest. It:
 
@@ -32,7 +36,7 @@ Hyprland gestures. `setup.sh` (one time, with sudo) unlocks the rest. It:
 - installs a `systemd-sleep` hook so RGB and charge limit come back after resume
 - enables the user services `vivobook-rgbd` and `vivobook-apply`, links `~/.local/bin/vivobook-ctl`, renders the Hyprland bindings, adds the menu entries and enables the plugin
 
-Remove everything with `sudo .../uninstall.sh`, then `omarchy plugin remove io.github.leandrooricchio.vivobook`.
+Remove everything with `sudo /usr/local/libexec/vivobook/uninstall`, then `omarchy plugin remove io.github.leandrooricchio.vivobook`.
 
 ## Use
 
@@ -212,8 +216,24 @@ cached component after a syntax error).
 
 ## Privilege boundary
 
-Nothing in the plugin runs as root at runtime. `setup.sh` is the only privileged step; the
-sudoers entry allows exactly one root helper (`vivobook-charge`) that accepts only `60`, `80`,
+Nothing in the plugin runs as root at runtime. `setup.sh` is the only privileged step. The plugin
+checkout is writable by anything running as you, so root never installs from it directly:
+`setup.sh` first copies a fixed list of files into a root-owned directory under `/var/lib`,
+checks them there against `SHA256SUMS` (and against `--expect <sha256>` when given), then
+re-executes the copy and installs only from it. The uninstaller is installed root-owned at
+`/usr/local/libexec/vivobook/uninstall`, so removal never runs code from the checkout either.
+Maintainers regenerate the sums with `tools/make-sums.sh`; the printed digest goes in the release notes.
+This closes the swap-files-while-sudo-runs class of attack; it does not defend against malware
+already running as your user, which can alter your shell or `sudo` alias anyway.
+
+What `setup.sh` changes as root: `pacman -S python-evdev brightnessctl wtype`;
+`/etc/udev/rules.d/70-vivobook.rules`; `/etc/modules-load.d/vivobook.conf`;
+`/usr/local/libexec/vivobook-charge` and `/etc/sudoers.d/vivobook`; the
+`vivobook-charge.service` boot unit; `/usr/lib/systemd/system-sleep/vivobook`;
+`/usr/local/libexec/vivobook/uninstall`; `/etc/vivobook/`. After a plugin update, re-run
+`setup.sh` (`vivobook-ctl doctor` flags a version mismatch).
+
+The sudoers entry allows exactly one root helper (`vivobook-charge`) that accepts only `60`, `80`,
 `100` or `restore`. The RGB controller, uinput and the touchpad node are made accessible to the
 logged-in seat user via udev `uaccess` ACLs.
 
