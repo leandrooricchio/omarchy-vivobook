@@ -87,7 +87,7 @@ stage_and_exec() {
 }
 
 install_system() {
-
+  local stage="$1"
   STAGE_DIR="$stage"
   trap 'rm -rf "$STAGE_DIR"' EXIT
 

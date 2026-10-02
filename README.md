@@ -211,6 +211,10 @@ omarchy plugin enable io.github.leandrooricchio.vivobook --section right --index
 qs log -p "$OMARCHY_PATH/shell" --tail 50   # QML errors land here
 ```
 
+To test `setup.sh`, run it from the synced copy, not the checkout:
+`sudo ~/.config/omarchy/plugins/io.github.leandrooricchio.vivobook/setup.sh --yes`. After changing a
+payload file, regenerate the sums with `tools/make-sums.sh` before syncing.
+
 If a QML change does not show up, `omarchy restart shell` (the shell occasionally keeps a
 cached component after a syntax error).
 
