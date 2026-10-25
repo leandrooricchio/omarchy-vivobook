@@ -11,6 +11,8 @@ that lands on an edge zone and slides along it:
 
 Everything else (taps in the zone, two-finger scroll, clicks) is passed
 through untouched, with at most a short delay while a touch is being judged.
+After a suspend/resume the touchpad is released and the clone re-created, so
+touches whose release was lost while asleep cannot leave a stuck finger behind.
 Needs python-evdev and read access to the touchpad + /dev/uinput (setup.sh).
 """
 
@@ -87,6 +89,7 @@ class EdgeDaemon:
         self.reload = False
         self.dev = None
         self.ui = None
+        self.last_wall, self.last_mono = time.time(), time.monotonic()
         signal.signal(signal.SIGTERM, self._term)
         signal.signal(signal.SIGINT, self._term)
         signal.signal(signal.SIGHUP, self._hup)
@@ -138,6 +141,13 @@ class EdgeDaemon:
         if self.ui:
             self.ui.close()
             self.ui = None
+
+    def resumed(self):
+        """Wall clock jumped ahead of the monotonic clock: we slept."""
+        wall, mono = time.time(), time.monotonic()
+        jumped = (wall - self.last_wall) - (mono - self.last_mono) > 3
+        self.last_wall, self.last_mono = wall, mono
+        return jumped
 
     def apply_config(self):
         self.cfg = load_edge_config()
@@ -304,6 +314,10 @@ class EdgeDaemon:
     def run(self):
         frame = []
         while not self.stop:
+            if self.resumed() and self.dev:
+                log("resume detected; re-creating clone")
+                self.close()
+                frame = []
             if not self.dev and not self.open():
                 time.sleep(RETRY_SECONDS)
                 continue
